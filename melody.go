@@ -8,8 +8,48 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Close codes defined in RFC 6455, section 11.7.
+// Duplicate of codes from gorilla/websocket for convenience.
+const (
+	CloseNormalClosure           = 1000
+	CloseGoingAway               = 1001
+	CloseProtocolError           = 1002
+	CloseUnsupportedData         = 1003
+	CloseNoStatusReceived        = 1005
+	CloseAbnormalClosure         = 1006
+	CloseInvalidFramePayloadData = 1007
+	ClosePolicyViolation         = 1008
+	CloseMessageTooBig           = 1009
+	CloseMandatoryExtension      = 1010
+	CloseInternalServerErr       = 1011
+	CloseServiceRestart          = 1012
+	CloseTryAgainLater           = 1013
+	CloseTLSHandshake            = 1015
+)
+
+// Duplicate of codes from gorilla/websocket for convenience.
+var validReceivedCloseCodes = map[int]bool{
+	// see http://www.iana.org/assignments/websocket/websocket.xhtml#close-code-number
+
+	CloseNormalClosure:           true,
+	CloseGoingAway:               true,
+	CloseProtocolError:           true,
+	CloseUnsupportedData:         true,
+	CloseNoStatusReceived:        false,
+	CloseAbnormalClosure:         false,
+	CloseInvalidFramePayloadData: true,
+	ClosePolicyViolation:         true,
+	CloseMessageTooBig:           true,
+	CloseMandatoryExtension:      true,
+	CloseInternalServerErr:       true,
+	CloseServiceRestart:          true,
+	CloseTryAgainLater:           true,
+	CloseTLSHandshake:            false,
+}
+
 type handleMessageFunc func(*Session, []byte)
 type handleErrorFunc func(*Session, error)
+type handleCloseFunc func(*Session, int, string) error
 type handleSessionFunc func(*Session)
 type filterFunc func(*Session) bool
 
@@ -22,6 +62,7 @@ type Melody struct {
 	messageSentHandler       handleMessageFunc
 	messageSentHandlerBinary handleMessageFunc
 	errorHandler             handleErrorFunc
+	closeHandler             handleCloseFunc
 	connectHandler           handleSessionFunc
 	disconnectHandler        handleSessionFunc
 	pongHandler              handleSessionFunc
@@ -47,6 +88,7 @@ func New() *Melody {
 		messageSentHandler:       func(*Session, []byte) {},
 		messageSentHandlerBinary: func(*Session, []byte) {},
 		errorHandler:             func(*Session, error) {},
+		closeHandler:             func(*Session, int, string) error { return nil },
 		connectHandler:           func(*Session) {},
 		disconnectHandler:        func(*Session) {},
 		pongHandler:              func(*Session) {},
@@ -94,6 +136,25 @@ func (m *Melody) HandleError(fn func(*Session, error)) {
 	m.errorHandler = fn
 }
 
+// HandleClose sets the handler for close messages received from the session.
+// The code argument to h is the received close code or CloseNoStatusReceived
+// if the close message is empty. The default close handler sends a close frame
+// back to the session.
+//
+// The application must read the connection to process close messages as
+// described in the section on Control Frames above.
+//
+// The connection read methods return a CloseError when a close frame is
+// received. Most applications should handle close messages as part of their
+// normal error handling. Applications should only set a close handler when the
+// application must perform some action before sending a close frame back to
+// the session.
+func (m *Melody) HandleClose(fn func(*Session, int, string) error) {
+	if fn != nil {
+		m.closeHandler = fn
+	}
+}
+
 // HandleRequest upgrades http requests to websocket connections and dispatches them to be handled by the melody instance.
 func (m *Melody) HandleRequest(w http.ResponseWriter, r *http.Request) error {
 	return m.HandleRequestWithKeys(w, r, nil)
@@ -102,7 +163,7 @@ func (m *Melody) HandleRequest(w http.ResponseWriter, r *http.Request) error {
 // HandleRequestWithKeys does the same as HandleRequest but populates session.Keys with keys.
 func (m *Melody) HandleRequestWithKeys(w http.ResponseWriter, r *http.Request, keys map[string]interface{}) error {
 	if m.hub.closed() {
-		return errors.New("Melody instance is closed.")
+		return errors.New("melody instance is closed")
 	}
 
 	conn, err := m.Upgrader.Upgrade(w, r, nil)
@@ -143,7 +204,7 @@ func (m *Melody) HandleRequestWithKeys(w http.ResponseWriter, r *http.Request, k
 // Broadcast broadcasts a text message to all sessions.
 func (m *Melody) Broadcast(msg []byte) error {
 	if m.hub.closed() {
-		return errors.New("Melody instance is closed.")
+		return errors.New("melody instance is closed")
 	}
 
 	message := &envelope{t: websocket.TextMessage, msg: msg}
@@ -155,7 +216,7 @@ func (m *Melody) Broadcast(msg []byte) error {
 // BroadcastFilter broadcasts a text message to all sessions that fn returns true for.
 func (m *Melody) BroadcastFilter(msg []byte, fn func(*Session) bool) error {
 	if m.hub.closed() {
-		return errors.New("Melody instance is closed.")
+		return errors.New("melody instance is closed")
 	}
 
 	message := &envelope{t: websocket.TextMessage, msg: msg, filter: fn}
@@ -184,7 +245,7 @@ func (m *Melody) BroadcastMultiple(msg []byte, sessions []*Session) error {
 // BroadcastBinary broadcasts a binary message to all sessions.
 func (m *Melody) BroadcastBinary(msg []byte) error {
 	if m.hub.closed() {
-		return errors.New("Melody instance is closed.")
+		return errors.New("melody instance is closed")
 	}
 
 	message := &envelope{t: websocket.BinaryMessage, msg: msg}
@@ -196,7 +257,7 @@ func (m *Melody) BroadcastBinary(msg []byte) error {
 // BroadcastBinaryFilter broadcasts a binary message to all sessions that fn returns true for.
 func (m *Melody) BroadcastBinaryFilter(msg []byte, fn func(*Session) bool) error {
 	if m.hub.closed() {
-		return errors.New("Melody instance is closed.")
+		return errors.New("melody instance is closed")
 	}
 
 	message := &envelope{t: websocket.BinaryMessage, msg: msg, filter: fn}
@@ -215,10 +276,22 @@ func (m *Melody) BroadcastBinaryOthers(msg []byte, s *Session) error {
 // Close closes the melody instance and all connected sessions.
 func (m *Melody) Close() error {
 	if m.hub.closed() {
-		return errors.New("Melody instance is already closed.")
+		return errors.New("melody instance is already closed")
 	}
 
-	m.hub.exit <- true
+	m.hub.exit <- &envelope{t: websocket.CloseMessage, msg: []byte{}}
+
+	return nil
+}
+
+// CloseWithMsg closes the melody instance with the given close payload and all connected sessions.
+// Use the FormatCloseMessage function to format a proper close message payload.
+func (m *Melody) CloseWithMsg(msg []byte) error {
+	if m.hub.closed() {
+		return errors.New("melody instance is already closed")
+	}
+
+	m.hub.exit <- &envelope{t: websocket.CloseMessage, msg: msg}
 
 	return nil
 }
@@ -226,4 +299,9 @@ func (m *Melody) Close() error {
 // Len return the number of connected sessions.
 func (m *Melody) Len() int {
 	return m.hub.len()
+}
+
+// FormatCloseMessage formats closeCode and text as a WebSocket close message.
+func FormatCloseMessage(closeCode int, text string) []byte {
+	return websocket.FormatCloseMessage(closeCode, text)
 }
