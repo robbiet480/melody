@@ -2,9 +2,10 @@ package melody
 
 import (
 	"errors"
-	"github.com/gorilla/websocket"
 	"net/http"
 	"sync"
+
+	"github.com/gorilla/websocket"
 )
 
 type handleMessageFunc func(*Session, []byte)
@@ -167,6 +168,16 @@ func (m *Melody) BroadcastFilter(msg []byte, fn func(*Session) bool) error {
 func (m *Melody) BroadcastOthers(msg []byte, s *Session) error {
 	return m.BroadcastFilter(msg, func(q *Session) bool {
 		return s != q
+	})
+}
+
+// BroadcastMultiple broadcasts a text message to multiple sessions given in the sessions slice.
+func (m *Melody) BroadcastMultiple(msg []byte, sessions []*Session) error {
+	return m.BroadcastFilter(msg, func(q *Session) bool {
+		for _, sess := range sessions {
+			return sess == q
+		}
+		return false
 	})
 }
 
