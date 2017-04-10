@@ -35,7 +35,7 @@ func (s *Session) writeMessage(message *envelope) {
 
 func (s *Session) writeRaw(message *envelope) error {
 	if s.closed() {
-		return errors.New("trie to write to a closed session")
+		return errors.New("tried to write to a closed session")
 	}
 
 	s.conn.SetWriteDeadline(time.Now().Add(s.melody.Config.WriteWait))
@@ -210,4 +210,9 @@ func (s *Session) MustGet(key string) interface{} {
 	}
 
 	panic("Key \"" + key + "\" does not exist")
+}
+
+// IsClosed returns the status of the connection.
+func (s *Session) IsClosed() bool {
+	return s.closed()
 }
